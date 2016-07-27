@@ -1,11 +1,33 @@
 # -*- coding: utf-8 -*-
 
+import os
+import platform
 import sys
 from ctypes import *
 
 from . import utils
 
-_vix = cdll.LoadLibrary('vix.dll' if sys.platform[:3] == 'win' else 'libvixAllProducts.so')
+def get_vix_path_nt():
+    # The "x86" variable is not defined on (at least some) 32-bit versions of Windows.
+    program_files = os.path.expandvars("%ProgramFiles(x86)%") or \
+                    os.path.expandvars("%ProgramFiles%")
+    vix_folder = os.path.join(program_files, "VMware", "VMware VIX")
+    
+    # This is what Python's docs (see "platform.architecture") recommend to
+    # check interpreter bitness. *sigh*
+    if sys.maxsize > 2**32:
+        dll_name = "Vix64AllProductsDyn.dll"
+    else:
+        dll_name = "VixAllProductsDyn.dll"
+    return os.path.join(vix_folder, dll_name)
+    
+def get_vix_path():
+    if platform.uname()[0].lower() == 'windows':
+        return get_vix_path_nt()
+    else:
+        return 'libvixAllProducts.so'
+
+_vix = cdll.LoadLibrary(get_vix_path())
 _libc = cdll.LoadLibrary(utils.get_libc_name())
 
 # === Global ===
@@ -551,17 +573,30 @@ class VixHost:
         """
         self.host_handle = VIX_INVALID_HANDLE
 
-        job_hdl = _vix.VixHost_Connect(VIX_API_VERSION,
-            VIX_SERVICEPROVIDER_DEFAULT,
-            c_char_p('https://%s/sdk' % hostname),
-            hostport,
-            c_char_p(username),
-            c_char_p(password),
-            0, # Should be zero
-            VIX_INVALID_HANDLE,
-            None,
-            None
-        )
+        if hostname is None:
+            job_hdl = _vix.VixHost_Connect(VIX_API_VERSION,
+                VIX_SERVICEPROVIDER_VMWARE_WORKSTATION,
+                None,
+                0,
+                None,
+                None,
+                0,
+                VIX_INVALID_HANDLE,
+                None,
+                None
+            )
+        else:        
+            job_hdl = _vix.VixHost_Connect(VIX_API_VERSION,
+                VIX_SERVICEPROVIDER_DEFAULT,
+                c_char_p('https://%s/sdk' % hostname),
+                hostport,
+                c_char_p(username),
+                c_char_p(password),
+                0, # Should be zero
+                VIX_INVALID_HANDLE,
+                None,
+                None
+            )
 
         hdl = c_int()
         err = _vix.VixJob_Wait(job_hdl,
