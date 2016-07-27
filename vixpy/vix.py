@@ -3,7 +3,7 @@
 import sys
 from ctypes import *
 
-import utils
+from . import utils
 
 _vix = cdll.LoadLibrary('vix.dll' if sys.platform[:3] == 'win' else 'libvixAllProducts.so')
 _libc = cdll.LoadLibrary(utils.get_libc_name())
