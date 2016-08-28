@@ -1038,6 +1038,73 @@ class VixVM:
             raise VixException(err)
 
         return bool(propval.value) if type == VIX_PROPERTYTYPE_BOOL else propval.value
+        
+    def _get_variable(self, name, variable_type):
+        if not self._vixhost.is_connected:
+            raise VixException('Host disconnected')
+            
+        if not self.is_opened:
+            raise VixException('VM has not been opened')
+            
+        handle = _vix.VixVM_ReadVariable(self._vm_handle,
+            variable_type,
+            name,
+            0,
+            None,
+            None
+        )
+        
+        data = c_char_p()
+        err = _vix.VixJob_Wait(handle,
+            VIX_PROPERTY_JOB_RESULT_VM_VARIABLE_STRING,
+            byref(data),
+            VIX_PROPERTY_NONE
+        )
+        
+        if err != VIX_OK:
+            raise VixException(err)
+            
+        var = data.value
+        _vix.Vix_FreeBuffer(data)
+        if var == '':
+            return None
+        else:
+            return var
+        
+    def get_environment_variable(self, name):
+        return self._get_variable(name, VIX_GUEST_ENVIRONMENT_VARIABLE)
+        
+    def get_vmx_variable(self, name):
+        return self._get_variable(name, VIX_VM_CONFIG_RUNTIME_ONLY)
+        
+    def get_runtime_variable(self, name):
+        return self._get_variable(name, VIX_VM_GUEST_VARIABLE)
+        
+    def _set_variable(self, name, value, variable_type):
+        if not self._vixhost.is_connected:
+            raise VixException('Host disconnected')
+            
+        if not self.is_opened:
+            raise VixException('VM has not been opened')
+            
+        self._exec_cmd(_vix.VixVM_WriteVariable,
+            self._vm_handle,
+            variable_type,
+            name,
+            value,
+            0,
+            None,
+            None
+        )
+        
+    def set_environment_variable(self, name, value):
+        return self._set_variable(name, value, VIX_GUEST_ENVIRONMENT_VARIABLE)
+        
+    def set_vmx_variable(self, name, value):
+        return self._set_variable(name, value, VIX_VM_CONFIG_RUNTIME_ONLY)
+        
+    def set_runtime_variable(self, name, value):
+        return self._set_variable(name, value, VIX_VM_GUEST_VARIABLE)
 
     # File transfer
     def send_file(self, src, dest):
