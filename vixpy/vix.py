@@ -526,6 +526,52 @@ VIX_INSTALLTOOLS_MOUNT_TOOLS_INSTALLER             = 0x00
 VIX_INSTALLTOOLS_AUTO_UPGRADE                      = 0x01
 VIX_INSTALLTOOLS_RETURN_IMMEDIATELY                = 0x02
 
+# Property
+def get_property_type(hdl, prop):
+    """
+    Get property type for the property of the given handle.
+
+    @param prop: property.
+    """
+    type = c_int()
+    err = _vix.Vix_GetPropertyType(hdl, prop, byref(type))
+    if err != VIX_OK:
+        raise VixException(err)
+
+    return type.value
+
+def get_property(hdl, prop):
+    """
+    Get property value for the property of the given handle.
+
+    @param prop: property.
+    """
+    type = get_property_type(hdl, prop)
+    propval = c_int()
+    if type == VIX_PROPERTYTYPE_STRING or type == VIX_PROPERTYTYPE_BLOB:
+        propval = c_char_p()
+
+    err = _vix.Vix_GetProperties(hdl,
+        prop,
+        byref(propval),
+        VIX_PROPERTY_NONE
+    )
+    if err != VIX_OK:
+        raise VixException(err)
+
+    return bool(propval.value) if type == VIX_PROPERTYTYPE_BOOL else propval.value
+
+def _exec_cmd(func, *args, **kwargs):
+    if not hasattr(func, '__call__'):
+        raise TypeError('%r should be callable.' % func)
+
+    job_hdl = func(*args, **kwargs)
+
+    err = _vix.VixJob_Wait(job_hdl, VIX_PROPERTY_NONE)
+    _vix.Vix_ReleaseHandle(job_hdl)
+    if err != VIX_OK:
+        raise VixException(err)
+
 # === Exception ===
 class VixException(Exception):
     """
@@ -621,6 +667,43 @@ class VixHost:
         self.is_connected = False
         self.host_handle = VIX_INVALID_HANDLE
 
+class Snapshot(object):
+    def __init__(self, handle):
+        self._hdl = handle
+
+    def get_child_snapshots(self):
+        num = c_int()
+        err = _vix.VixSnapshot_GetNumChildren(self._hdl, pointer(num))
+        if err != VIX_OK:
+            raise VixException(err)
+
+        children = []
+        for i in range(num.value):
+            snapshot_ptr = c_int()
+            err = _vix.VixSnapshot_GetChild(self._hdl, i, pointer(snapshot_ptr))
+            if err != VIX_OK:
+                raise VixException(err)
+            children.append(Snapshot(snapshot_ptr.value))
+
+        return children
+
+    @property
+    def name(self):
+        return get_property(self._hdl, VIX_PROPERTY_SNAPSHOT_DISPLAYNAME)
+
+    @property
+    def description(self):
+        return get_property(self._hdl, VIX_PROPERTY_SNAPSHOT_DESCRIPTION)
+
+    def close(self):
+        if self._hdl is not None:
+            hdl = self._hdl
+            self._hdl = None
+            _vix.Vix_ReleaseHandle(hdl)
+
+    def __del__(self):
+        self.close()
+
 class VixVM:
     """
     A Virtual Machine that is included in a host server.
@@ -652,15 +735,7 @@ class VixVM:
         if not self.is_opened:
             raise VixException('VM has not been opened')
 
-        if (not hasattr(func, '__call__')):
-            raise TypeError('%r should be callable.' % func)
-
-        job_hdl = func(*args, **kwargs)
-
-        err = _vix.VixJob_Wait(job_hdl, VIX_PROPERTY_NONE)
-        _vix.Vix_ReleaseHandle(job_hdl)
-        if err != VIX_OK:
-            raise VixException(err)
+        return _exec_cmd(func, *args, **kwargs)
 
     # VM basic
     def open(self, vmpath):
@@ -926,6 +1001,31 @@ class VixVM:
             None
         )
 
+    def get_root_snapshots(self):
+        snapshot_num = c_int32()
+        err = _vix.VixVM_GetNumRootSnapshots(self._vm_handle, pointer(snapshot_num))
+        if err != VIX_OK:
+            raise VixException(err)
+
+        roots = []
+        try:
+            for i in range(snapshot_num.value):
+                snapshot_ptr = c_int()
+                err = _vix.VixVM_GetRootSnapshot(
+                    self._vm_handle,
+                    i,
+                    pointer(snapshot_ptr)
+                )
+                if err != VIX_OK:
+                    raise VixException(err)
+                roots.append(Snapshot(snapshot_ptr.value))
+        except:
+            for root in roots:
+                root.close()
+            raise
+
+        return roots
+
     # Snapshot
     def create_snapshot(self, name=None, description=None):
         """
@@ -944,7 +1044,9 @@ class VixVM:
             None
         )
 
-    def _get_snapshot_by_name(self, name):
+        return self.get_snapshot_by_name(name)
+
+    def get_snapshot_by_name(self, name):
         """
         Get a snapshot handle by name.
 
@@ -955,40 +1057,46 @@ class VixVM:
         if err != VIX_OK:
             raise VixException(err)
 
-        return hdl.value
+        return Snapshot(hdl.value)
 
-    def remove_snapshot(self, name):
+    def remove_snapshot(self, name_or_snapshot_obj):
         """
         Remove a snapshot from the guest OS.
 
         @param name: a customized snapshot name.
         """
-        snap_handle = self._get_snapshot_by_name(name)
+        if not isinstance(name_or_snapshot_obj, Snapshot):
+            snap = self.get_snapshot_by_name(name_or_snapshot_obj)
+        else:
+            snap = name_or_snapshot_obj
         self._exec_cmd(_vix.VixVM_RemoveSnapshot,
             self._vm_handle,
-            snap_handle,
+            snap,
             0,
             None,
             None
         )
-        _vix.Vix_ReleaseHandle(snap_handle)
+        _vix.Vix_ReleaseHandle(snap)
 
-    def revert_to_snapshot(self, name):
+    def revert_to_snapshot(self, name_or_snapshot_obj):
         """
         Revert to a snapshot.
 
         @param name: a customized snapshot name.
         """
-        snap_handle = self._get_snapshot_by_name(name)
+        if not isinstance(name_or_snapshot_obj, Snapshot):
+            snap = self.get_snapshot_by_name(name_or_snapshot_obj)
+        else:
+            snap = name_or_snapshot_obj
         self._exec_cmd(_vix.VixVM_RevertToSnapshot,
             self._vm_handle,
-            snap_handle,
+            snap,
             0,
             VIX_INVALID_HANDLE,
             None,
             None
         )
-        _vix.Vix_ReleaseHandle(snap_handle)
+        _vix.Vix_ReleaseHandle(snap)
 
         self.wait_for_tools_in_guest()
 
@@ -1005,12 +1113,7 @@ class VixVM:
         if not self.is_opened:
             raise VixException('VM has not been opened')
 
-        type = c_int()
-        err = _vix.Vix_GetPropertyType(self._vm_handle, prop, byref(type))
-        if err != VIX_OK:
-            raise VixException(err)
-
-        return type.value
+        return get_property_type(self._vm_handle, prop)
 
     def get_property(self, prop):
         """
@@ -1024,20 +1127,7 @@ class VixVM:
         if not self.is_opened:
             raise VixException('VM has not been opened')
 
-        type = self.get_property_type(prop)
-        propval = c_int()
-        if type == VIX_PROPERTYTYPE_STRING or type == VIX_PROPERTYTYPE_BLOB:
-            propval = c_char_p()
-
-        err = _vix.Vix_GetProperties(self._vm_handle,
-            prop,
-            byref(propval),
-            VIX_PROPERTY_NONE
-        )
-        if err != VIX_OK:
-            raise VixException(err)
-
-        return bool(propval.value) if type == VIX_PROPERTYTYPE_BOOL else propval.value
+        return get_property(self._vm_handle, prop)
         
     def _get_variable(self, name, variable_type):
         if not self._vixhost.is_connected:
