@@ -5,6 +5,7 @@ import platform
 import sys
 from ctypes import *
 
+from .types import *
 from . import utils
 
 def get_vix_path_nt():
@@ -547,8 +548,10 @@ def get_property(hdl, prop):
     @param prop: property.
     """
     type = get_property_type(hdl, prop)
+    is_buffer = False
     propval = c_int()
-    if type == VIX_PROPERTYTYPE_STRING or type == VIX_PROPERTYTYPE_BLOB:
+    if type in (VIX_PROPERTYTYPE_STRING, VIX_PROPERTYTYPE_BLOB):
+        is_buffer = True
         propval = c_char_p()
 
     err = _vix.Vix_GetProperties(hdl,
@@ -559,7 +562,15 @@ def get_property(hdl, prop):
     if err != VIX_OK:
         raise VixException(err)
 
-    return bool(propval.value) if type == VIX_PROPERTYTYPE_BOOL else propval.value
+    value = propval.value
+    if type == VIX_PROPERTYTYPE_BOOL:
+        value = bool(value)
+
+    if is_buffer:
+        # Free the buffer.
+        _vix.Vix_FreeBuffer(propval)
+
+    return value
 
 def _exec_cmd(func, *args, **kwargs):
     if not hasattr(func, '__call__'):
@@ -589,6 +600,13 @@ class VixException(Exception):
 
     def __str__(self):
         return repr(self._msg)
+
+class VixHandle(object):
+    def __init__(self, hdl):
+        self._as_parameter_ = hdl
+
+    def __del__(self):
+        _vix.Vix_ReleaseHandle(self._as_parameter_)
 
 # === Class ===
 class VixHost:
@@ -667,6 +685,33 @@ class VixHost:
         self.is_connected = False
         self.host_handle = VIX_INVALID_HANDLE
 
+    def list_running_vms(self):
+        if not self.is_connected:
+            raise VixException("Not connected to host")
+
+        vms = []
+
+        # noinspection PyUnusedLocal
+        def find_callback(hdl, _type, info, client_data):
+            if _type != VIX_EVENTTYPE_FIND_ITEM:
+                return
+
+            path = get_property(info, VIX_PROPERTY_FOUND_ITEM_LOCATION)
+            vms.append(path)
+
+        callback = VixEventProc(find_callback)
+        _exec_cmd(
+            _vix.VixHost_FindItems,
+            self.host_handle,
+            VIX_FIND_RUNNING_VMS,
+            VIX_INVALID_HANDLE,
+            -1,
+            callback,
+            0
+        )
+
+        return vms
+
 class Snapshot(object):
     def __init__(self, handle):
         self._hdl = handle
@@ -727,6 +772,18 @@ class VixVM:
         Destructor
         """
         self.close()
+
+    @classmethod
+    def from_handle(cls, host, hdl):
+        if _vix.Vix_GetHandleType(host) == VIX_HANDLETYPE_NONE:
+            raise ValueError("Invalid host handle passed!")
+
+        if _vix.Vix_GetHandleType(hdl) == VIX_HANDLETYPE_NONE:
+            raise ValueError("Invalid VM handle passed!")
+
+        instance = cls(host)
+        instance._vm_handle = hdl
+        instance.is_opened = True
 
     def _exec_cmd(self, func, *args, **kwargs):
         if not self._vixhost.is_connected:
@@ -1289,3 +1346,39 @@ class VixVM:
             n = n - b
         _libc.fclose(file)
 
+    def clone(self, new_path, snapshot=None, linked=True):
+        if snapshot is None:
+            snapshot_hdl = VIX_INVALID_HANDLE
+        elif isinstance(snapshot, basestring):
+            snapshot = self.get_snapshot_by_name(snapshot)
+            snapshot_hdl = snapshot._hdl
+        else:
+            snapshot_hdl = snapshot._hdl
+
+        if not new_path.endswith('.vmx'):
+            new_path = os.path.join(new_path, os.path.basename(new_path) + '.vmx')
+
+        job_hdl = VixHandle(_vix.VixVM_Clone(
+            self._vm_handle,
+            snapshot_hdl,
+            VIX_CLONETYPE_LINKED if linked else VIX_CLONETYPE_FULL,
+            new_path,
+            0,
+            VIX_INVALID_HANDLE,
+            None,
+            None
+        ))
+
+        vm_hdl = c_int()
+
+        err = _vix.VixJob_Wait(
+            job_hdl,
+            VIX_PROPERTY_JOB_RESULT_HANDLE,
+            byref(vm_hdl),
+            VIX_PROPERTY_NONE
+        )
+
+        if err != VIX_OK:
+            raise VixException(err)
+
+        return VixVM.from_handle(self._vixhost, vm_hdl)
