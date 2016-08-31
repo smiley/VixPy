@@ -715,6 +715,7 @@ class VixHost:
 class Snapshot(object):
     def __init__(self, handle):
         self._hdl = handle
+        self._as_parameter_ = self._hdl
 
     def get_child_snapshots(self):
         num = c_int()
@@ -766,6 +767,7 @@ class VixVM:
             raise TypeError('%r should be a %r object.' % (vixhost, VixHost))
 
         self._vixhost = vixhost
+        self._path = None
 
     def __del__(self):
         """
@@ -827,7 +829,14 @@ class VixVM:
             raise VixException(err)
 
         self.is_opened = True
+        self._path = vmpath
         self._vm_handle = hdl.value
+
+    def reopen(self):
+        if self._path is None:
+            raise ValueError("No path saved for this VM.")
+        self.close()
+        self.open(self._path)
 
     def close(self):
         """
@@ -890,7 +899,7 @@ class VixVM:
             None
         )
 
-    def reset(self):
+    def reset(self, wait_for_tools=True):
         """
         Power reset current virtual machine.
         """
@@ -901,9 +910,10 @@ class VixVM:
             None
         )
 
-        self.wait_for_tools_in_guest()
+        if wait_for_tools:
+            self.wait_for_tools_in_guest()
 
-    def reboot(self):
+    def reboot(self, wait_for_tools=True):
         """
         Reboot current virtual machine from the guest OS.
         """
@@ -914,7 +924,8 @@ class VixVM:
             None
         )
 
-        self.wait_for_tools_in_guest()
+        if wait_for_tools:
+            self.wait_for_tools_in_guest()
 
     def suspend(self):
         """
